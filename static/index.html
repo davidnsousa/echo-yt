@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>echo-yt</title>
+<link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<aside class="rail">
+  <a class="brand" href="#/"><img src="/static/icon.svg" alt=""><span>echo<em>yt</em></span></a>
+  <nav id="nav"></nav>
+  <div class="rail-scroll">
+    <div class="rail-head"><a href="#/playlists">Playlists</a><button id="railNewPl" class="ghost icon" title="New playlist"></button></div>
+    <div id="railPlaylists"></div>
+    <div class="rail-head"><a href="#/channels">Channels</a></div>
+    <div id="railChannels"></div>
+  </div>
+  <button id="settingsBtn" class="ghost rail-settings"></button>
+</aside>
+
+<div class="main">
+  <header class="top">
+    <button id="backBtn" class="ghost icon" title="Back"></button>
+    <form id="searchForm" autocomplete="off">
+      <span id="searchIcon"></span>
+      <input id="searchInput" type="search" placeholder="Search YouTube, or paste a link…" aria-label="Search">
+      <kbd>/</kbd>
+      <div id="suggest" hidden></div>
+    </form>
+  </header>
+
+  <section id="view"></section>
+
+  <section id="watch" hidden>
+    <div class="halo"><img id="haloImg" alt="" referrerpolicy="no-referrer"></div>
+    <div class="watch-grid">
+      <div class="watch-main">
+        <div class="player" id="player" tabindex="-1">
+          <video id="V" playsinline></video>
+          <audio id="A"></audio>
+          <img id="poster" alt="" referrerpolicy="no-referrer">
+          <div class="spin" id="spin"></div>
+          <div class="perr" id="perr" hidden></div>
+          <div class="mini-bar">
+            <button class="icon" id="miniOpen" title="Back to the video"></button>
+            <button class="icon" id="miniClose" title="Stop and close"></button>
+          </div>
+          <div class="ctl" id="ctl">
+            <div class="seek" id="seek">
+              <div class="seek-track"><div id="seekBuf"></div><div id="seekFill"></div><div id="seekMarks"></div></div>
+              <div class="seek-tip" id="seekTip" hidden></div>
+            </div>
+            <div class="ctl-row">
+              <button class="pb" id="prevBtn" title="Previous (p)"></button>
+              <button class="pb" id="playBtn" title="Play / pause (space)"></button>
+              <button class="pb" id="nextBtn" title="Next (n)"></button>
+              <button class="pb" id="muteBtn" title="Mute (m)"></button>
+              <input id="vol" type="range" min="0" max="1" step="0.02" aria-label="Volume">
+              <span class="time" id="time">0:00</span>
+              <span class="live-tag" id="liveTag" hidden>LIVE</span>
+              <span class="grow"></span>
+              <select id="rateSel" title="Speed"></select>
+              <select id="qualSel" title="Quality"></select>
+              <button class="pb" id="fsBtn" title="Fullscreen (f)"></button>
+            </div>
+          </div>
+        </div>
+        <div id="watchInfo"></div>
+      </div>
+      <aside class="queue" id="queue"></aside>
+    </div>
+  </section>
+</div>
+
+<div id="toasts"></div>
+<div id="modal" hidden></div>
+<div id="offline">echo-yt has stopped. Start it again from the app menu (or run <code>echo-yt --open</code>); this page reconnects by itself.</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
