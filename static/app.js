@@ -920,3 +920,7 @@ refreshRail().then(route);
 api("/api/status").then(s => {
   if (!s.ytdlp) toast("yt-dlp isn't installed, so nothing can load. Run ./install.sh again or install it with pacman.", { bad: true, ms: 15000 });
 }).catch(() => {});
+
+const checkUpdate = () => api("/api/update").then(u => { $("updateNote").hidden = !u.available; }).catch(() => {});
+setTimeout(checkUpdate, 20000);
+setInterval(checkUpdate, 3600000);

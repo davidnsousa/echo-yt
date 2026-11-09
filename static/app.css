@@ -295,3 +295,6 @@ body.app-offline #offline { display: block; }
   #vol, #rateSel { display: none; }
   .row .thumb { width: calc(104px * var(--ui-scale)); }
 }
+
+#updateNote { padding: 6px 12px; font-size: 12px; line-height: 1.35; opacity: .7; }
+#updateNote[hidden] { display: none; }

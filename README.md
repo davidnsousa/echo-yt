@@ -23,7 +23,7 @@ If YouTube playback stops working, update yt-dlp first: `sudo pacman -Syu yt-dlp
 ./install.sh
 ```
 
-Run it again to update. See `echo-yt --help` for options. Remove with `./install.sh --uninstall` or `echo-yt -R`; your data stays.
+At start the app tells you when there is a newer version on GitHub; to update, `git pull` and run `./install.sh` again. See `echo-yt --help` for options. Remove with `./install.sh --uninstall` or `echo-yt -R`; your data stays.
 
 ## Usage
 

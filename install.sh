@@ -374,6 +374,18 @@ install_deps() {
     echo "$hash" | sudo tee "$stamp" >/dev/null
 }
 
+# the date of the commit installed, for the update check (not saved when this
+# copy of the repository is not a git clone)
+record_installed_commit() {
+    local src state date
+    src=$(cd "$(dirname "$0")" && pwd)
+    state=$HOME/.local/state/$COMMAND_NAME
+    mkdir -p "$state"
+    if date=$(git -C "$src" log -1 --format=%cI 2>/dev/null); then
+        echo "$date" > "$state/installed"
+    fi
+}
+
 next_steps() {
     cat <<EOF
 
@@ -413,6 +425,7 @@ main() {
     install_desktop_file
     setup_venv
     install_deps
+    record_installed_commit
     install_socket_units
     if [ "$restart_args" = "-" ] && [ "$SOCKET_ACTIVATION" = yes ] && have_user_systemd \
         && systemctl --user is-active --quiet "$SOCKET_UNIT"; then

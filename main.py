@@ -210,12 +210,47 @@ async def fetch_channel(ref, start=1, count=30, approximate=False):
 
 # ---------- app + request guard ----------
 
+STATE_DIR = Path.home() / ".local/state/echo-yt"
+INSTALLED_FILE, LATEST_FILE = STATE_DIR / "installed", STATE_DIR / "latest"
+UPDATE_URL = "https://api.github.com/repos/davidnsousa/echo-yt/commits/main"
+UPDATE_EVERY = 3600
+
+
+def read_date(path):
+    try:
+        return datetime.fromisoformat(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+async def update_watch(http):
+    """Saves GitHub's newest commit date, at most once an hour, even across restarts."""
+    while True:
+        try:
+            wait = UPDATE_EVERY - (time.time() - LATEST_FILE.stat().st_mtime)
+        except OSError:
+            wait = 0
+        if wait <= 0:
+            wait = UPDATE_EVERY
+            try:
+                r = await http.get(UPDATE_URL)
+                r.raise_for_status()
+                date = r.json()["commit"]["committer"]["date"].replace("Z", "+00:00")
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                LATEST_FILE.write_text(date)
+            except Exception:  # offline, rate limited, bad reply: keep the last result
+                pass
+        await asyncio.sleep(wait)
+
+
 @asynccontextmanager
 async def lifespan(app):
     init_db()
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(30, read=60), follow_redirects=True)
     _schedule_stop(STARTUP_GRACE)  # stop if no tab ever connects (see /api/alive)
+    watch = asyncio.create_task(update_watch(app.state.http))
     yield
+    watch.cancel()
     await app.state.http.aclose()
 
 
@@ -281,6 +316,12 @@ async def command_output(*cmd):
 
 def version_key(version):
     return tuple(int(n) for n in re.findall(r"\d+", version))
+
+
+@app.get("/api/update")
+async def update_status():
+    latest, installed = read_date(LATEST_FILE), read_date(INSTALLED_FILE)
+    return {"available": bool(latest and installed and latest > installed)}
 
 
 @app.get("/api/ytdlp")
