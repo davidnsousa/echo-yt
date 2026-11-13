@@ -170,7 +170,7 @@ async function openSettings() {
     <div class="setting"><span>Theme</span><select id="sTheme"><option value="dark">Dark</option><option value="light">Light</option></select></div>
     <div class="setting"><span>Text size</span><select id="sScale">${[[0.9, "Small"], [1, "Normal"], [1.12, "Large"], [1.25, "Extra large"]].map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></div>
     <div class="setting"><span>Preferred quality</span><select id="sQual">${[360, 480, 720, 1080, 1440, 2160].map(q => `<option value="${q}">${q}p</option>`).join("")}</select></div>
-    <div class="tools">${tool("yt-dlp", st.ytdlp)} · ${tool("ffmpeg", st.ffmpeg)} · ${tool("JS runtime", st.js_runtime)}<div id="sYtdlp">Checking yt-dlp version…</div></div>
+    <div class="tools">${tool("yt-dlp", st.ytdlp)} · ${tool("ffmpeg", st.ffmpeg)} · ${tool("JS runtime", st.js_runtime)} · ${tool("PoToken provider", st.pot_provider)}<div id="sYtdlp">Checking yt-dlp version…</div></div>
     <div class="btns"><button id="sDone" class="ghost">Done</button></div>`);
   const t = d.querySelector("#sTheme"), s = d.querySelector("#sScale"), q = d.querySelector("#sQual");
   t.value = store.get("theme", "dark"); s.value = store.get("scale", 1); q.value = store.get("quality", 1080);
@@ -334,7 +334,7 @@ async function viewChannels(token) {
       const f = await api("/api/feed" + (refresh ? "?refresh=true" : ""));
       if (token !== viewToken) return;
       $("cFeed").innerHTML = `<h3 class="sec">Latest uploads<span class="grow"></span><button id="feedRefresh" class="ghost">${ic("refresh", 15)}Refresh</button></h3>${videoGrid(f.videos, "Latest uploads")}`;
-      if (f.failed) toast(`${f.failed} channel${f.failed > 1 ? "s" : ""} couldn't be loaded`, { bad: true });
+      if (f.failed.length) toast(`Couldn't load the latest uploads from ${f.failed.join(", ")}`, { bad: true, ms: 8000 });
       $("feedRefresh").onclick = () => load(true);
     } catch (e) { if (token === viewToken) $("cFeed").innerHTML = errBox(e); }
   };
@@ -641,7 +641,7 @@ async function moreFromChannel(d, token) {
   if (!d.channel_id) return setQueue([], "", false);
   setQueue([], "", false);
   try {
-    const r = await api(`/api/channel/${d.channel_id}?count=16`);
+    const r = await api(`/api/channel/${d.channel_id}/latest`);
     if (token !== loadToken) return;
     setQueue(remember(r.videos.filter(v => v.id !== d.id)), `More from ${d.channel}`, false);
     drawQueue();

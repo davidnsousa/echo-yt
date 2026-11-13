@@ -17,6 +17,8 @@ Arch Linux (or anything with these installed): `python`, `yt-dlp`, `ffmpeg` (for
 
 If YouTube playback stops working, update yt-dlp first: `sudo pacman -Syu yt-dlp`.
 
+[bgutil-ytdlp-pot-provider](https://aur.archlinux.org/packages/bgutil-ytdlp-pot-provider) (AUR) makes YouTube's "Sign in to confirm you're not a bot" check much less likely; `install.sh` installs it when `paru` or `yay` is available. echo-yt works without it. When that check does happen, echo-yt pauses its YouTube requests for a few minutes instead of retrying.
+
 ## Install
 
 ```bash

@@ -17,6 +17,7 @@ import signal
 import socket
 import sqlite3
 import time
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,9 @@ PORT = int(os.environ.get("ECHO_YT_PORT", "8247"))
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "echo-yt"
 DB_PATH = CONFIG_DIR / "echo-yt.db"
+# Answers from YouTube, kept so a restart (the server stops whenever the last
+# tab closes) doesn't ask again. Separate from DB_PATH: safe to delete any time.
+CACHE_PATH = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "echo-yt" / "cache.db"
 
 VIDEO_ID = re.compile(r"^[\w-]{11}$")
 CHANNEL_ID = re.compile(r"^UC[\w-]{22}$")
@@ -91,6 +95,46 @@ def init_db():
         c.executescript(SCHEMA)
 
 
+class cache_conn(db):
+    """`with cache_conn() as c:` - like db(), on the cache file."""
+
+    def __enter__(self):
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(CACHE_PATH, timeout=10)
+        self.conn.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, saved REAL NOT NULL, data TEXT NOT NULL)")
+        return self.conn
+
+
+def cache_get(key, ttl):
+    """The value saved under key if it is younger than ttl seconds, else None."""
+    try:
+        with cache_conn() as conn:
+            row = conn.execute("SELECT saved, data FROM cache WHERE key=?", (key,)).fetchone()
+    except (sqlite3.Error, OSError):
+        return None
+    if row and time.time() - row[0] < ttl:
+        return json.loads(row[1])
+    return None
+
+
+def cache_put(key, value):
+    try:
+        with cache_conn() as conn:
+            conn.execute("INSERT OR REPLACE INTO cache(key,saved,data) VALUES(?,?,?)",
+                         (key, time.time(), json.dumps(value)))
+            conn.execute("DELETE FROM cache WHERE saved < ?", (time.time() - 86400,))
+    except (sqlite3.Error, OSError):
+        pass  # a cache that can't be written just means asking YouTube again
+
+
+def cache_drop(prefix):
+    try:
+        with cache_conn() as conn:
+            conn.execute("DELETE FROM cache WHERE key LIKE ?", (prefix + "%",))
+    except (sqlite3.Error, OSError):
+        pass
+
+
 def upsert_video(c, v):
     if not VIDEO_ID.match(str(v.get("id", ""))):
         raise HTTPException(400, "Bad video id")
@@ -126,7 +170,7 @@ def with_progress(videos):
 
 # ---------- yt-dlp ----------
 
-_slots = asyncio.Semaphore(6)
+_slots = asyncio.Semaphore(3)  # bursts of requests are what trip the bot check
 
 
 def ytdlp_base():
@@ -137,11 +181,59 @@ def ytdlp_base():
     # yt-dlp only enables deno by default, and needs a JS runtime for YouTube
     if not shutil.which("deno") and shutil.which("node"):
         cmd += ["--js-runtimes", "node"]
+    # The bgutil PoToken provider (AUR: bgutil-ytdlp-pot-provider), when
+    # installed, makes the tokens YouTube's bot check wants. Its yt-dlp plugin
+    # loads on its own and runs bgutil-pot from PATH, so no server is needed.
     return cmd
+
+
+# ---------- bot check cooldown ----------
+# "Sign in to confirm you're not a bot" means YouTube has seen too many
+# requests from this address. Asking again straight away keeps the block
+# going, so every yt-dlp call waits out a cooldown that doubles each time it
+# happens again soon after, and resets once a call works. Kept in a file, as
+# the server stops whenever the last tab closes.
+
+BLOCK_FILE = Path.home() / ".local/state/echo-yt/blocked"
+BLOCK_FIRST, BLOCK_MAX = 5 * 60, 60 * 60
+
+
+def read_block():
+    """(blocked until, last cooldown length), or (0, 0)."""
+    try:
+        until, length = BLOCK_FILE.read_text().split()
+        return float(until), float(length)
+    except (OSError, ValueError):
+        return 0.0, 0.0
+
+
+def blocked_error(until):
+    minutes = max(1, round((until - time.time()) / 60))
+    return HTTPException(429, f"YouTube is asking echo-yt to prove it isn't a bot, so echo-yt is "
+                              f"pausing its YouTube requests. Try again in {minutes} min.")
+
+
+def start_block():
+    until, length = read_block()
+    # only escalate if the last cooldown ended recently; otherwise start over
+    length = min(length * 2, BLOCK_MAX) if time.time() - until < BLOCK_MAX else BLOCK_FIRST
+    until = time.time() + length
+    BLOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BLOCK_FILE.write_text(f"{until} {length}")
+    return until
+
+
+def bot_check(message):
+    # not just "confirm you": yt-dlp's ordinary errors say "Confirm you are on the latest version"
+    m = message.lower().replace("’", "'")
+    return "not a bot" in m or "sign in to confirm you're" in m
 
 
 async def ytdlp_json(*args):
     """Run yt-dlp with the given arguments and return its parsed JSON output."""
+    until, _ = read_block()
+    if until > time.time():
+        raise blocked_error(until)
     cmd = ytdlp_base() + ["-J", *args]
     async with _slots:
         proc = await asyncio.create_subprocess_exec(
@@ -159,6 +251,8 @@ async def ytdlp_json(*args):
         lines = [l for l in err.decode(errors="replace").splitlines() if l.startswith("ERROR")]
         message = lines[-1] if lines else "yt-dlp failed"
         message = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?([\w-]{11}:\s*)?", "", message)
+        if bot_check(message):
+            raise blocked_error(start_block())
         raise HTTPException(502, message)
     return json.loads(out)
 
@@ -296,7 +390,8 @@ def index():
 @app.get("/api/status")
 def status():
     runtime = shutil.which("deno") or shutil.which("node")
-    return {"ytdlp": bool(shutil.which("yt-dlp")), "ffmpeg": bool(shutil.which("ffmpeg")), "js_runtime": bool(runtime)}
+    return {"ytdlp": bool(shutil.which("yt-dlp")), "ffmpeg": bool(shutil.which("ffmpeg")), "js_runtime": bool(runtime),
+            "pot_provider": bool(shutil.which("bgutil-pot"))}
 
 
 YTDLP_STALE_DAYS = 60  # YouTube changes often enough that this is worth a nudge
@@ -454,7 +549,7 @@ async def save_channel(ref: str):
     with db() as c:
         c.execute("INSERT OR REPLACE INTO channels(id,name,avatar,followers,added) VALUES(?,?,?,?,?)",
                   (ref, channel["name"], channel["avatar"], channel["followers"], time.time()))
-    _feed_cache.clear()
+    cache_drop("feed")
     return {**channel, "saved": True}
 
 
@@ -462,36 +557,103 @@ async def save_channel(ref: str):
 def forget_channel(ref: str):
     with db() as c:
         c.execute("DELETE FROM channels WHERE id=?", (ref,))
-    _feed_cache.clear()
+    cache_drop("feed")
     return {"ok": True}
 
 
-_feed_cache = {}
 FEED_TTL = 15 * 60
+RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
+ATOM = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015",
+        "media": "http://search.yahoo.com/mrss/"}
+
+
+async def rss_channel(http, ref, refresh=False):
+    """A channel's latest uploads (about 15) from its public RSS feed: one small
+    request instead of a yt-dlp run. No durations or live flags - those are
+    filled in from what echo-yt already knows about each video. Shorts are
+    left out, as on the channel's Videos tab."""
+    key = f"rss:{ref}"
+    if not refresh and (cached := cache_get(key, FEED_TTL)) is not None:
+        return cached
+    videos = await read_rss(http, ref)
+    cache_put(key, videos)
+    return videos
+
+
+async def read_rss(http, ref):
+    r = await http.get(RSS_URL.format(ref))
+    r.raise_for_status()
+    root = ET.fromstring(r.content)
+    name = root.findtext("a:title", None, ATOM)
+    videos = []
+    for e in root.findall("a:entry", ATOM):
+        vid = e.findtext("yt:videoId", "", ATOM)
+        link = (e.find("a:link", ATOM).get("href") if e.find("a:link", ATOM) is not None else "") or ""
+        if not VIDEO_ID.match(vid) or "/shorts/" in link:
+            continue
+        try:
+            stamp = int(datetime.fromisoformat(e.findtext("a:published", "", ATOM)).timestamp())
+        except ValueError:
+            stamp = None
+        stats = e.find("media:group/media:community/media:statistics", ATOM)
+        views = stats.get("views") if stats is not None else None
+        videos.append({"id": vid, "title": e.findtext("a:title", vid, ATOM), "channel": name, "channel_id": ref,
+                       "duration": None, "view_count": int(views) if views and views.isdigit() else None,
+                       "timestamp": stamp, "live": False})
+    return videos
+
+
+def fill_known(videos):
+    """Durations and live flags from the videos table, where echo-yt has them."""
+    ids = [v["id"] for v in videos]
+    if not ids:
+        return videos
+    with db() as c:
+        marks = ",".join("?" * len(ids))
+        known = {r["id"]: r for r in c.execute(f"SELECT id, duration, live FROM videos WHERE id IN ({marks})", ids)}
+    for v in videos:
+        if v["id"] in known:
+            v["duration"] = known[v["id"]]["duration"]
+            v["live"] = bool(known[v["id"]]["live"])
+    return videos
+
+
+@app.get("/api/channel/{ref}/latest")
+async def channel_latest(ref: str):
+    """A channel's newest uploads for the watch page's queue, from RSS."""
+    if not CHANNEL_ID.match(ref):
+        raise HTTPException(400, "Bad channel id")
+    try:
+        videos = await rss_channel(app.state.http, ref)
+    except (httpx.HTTPError, ET.ParseError):
+        raise HTTPException(502, "Couldn't load this channel's latest uploads")
+    return {"videos": with_progress(fill_known([dict(v) for v in videos]))}
 
 
 @app.get("/api/feed")
 async def feed(refresh: bool = False):
     """The newest uploads across every saved channel."""
     with db() as c:
-        channels = [r["id"] for r in c.execute("SELECT id FROM channels")]
+        rows = c.execute("SELECT id, name FROM channels").fetchall()
+    channels, names = [r["id"] for r in rows], [r["name"] for r in rows]
     if not channels:
-        return {"videos": [], "failed": 0}
-    cached = _feed_cache.get("feed")
-    if cached and not refresh and time.time() - cached[0] < FEED_TTL:
-        return {**cached[1], "videos": with_progress(cached[1]["videos"])}
-    results = await asyncio.gather(*(fetch_channel(ref, 1, 12, approximate=True) for ref in channels),
-                                   return_exceptions=True)
-    videos, failed = [], 0
-    for r in results:
+        return {"videos": [], "failed": []}
+    cached = None if refresh else cache_get("feed", FEED_TTL)
+    if cached:
+        return {**cached, "videos": with_progress(cached["videos"])}
+    http = app.state.http
+    results = await asyncio.gather(*(rss_channel(http, ref, refresh) for ref in channels), return_exceptions=True)
+    videos, failed = [], []
+    for name, r in zip(names, results):
         if isinstance(r, BaseException):
-            failed += 1
+            failed.append(name)  # the page names the channels that couldn't be loaded
         else:
-            videos += r[1]
+            videos += r[:12]
+    fill_known(videos)
     videos.sort(key=lambda v: v.get("timestamp") or 0, reverse=True)
     data = {"videos": videos[:60], "failed": failed}
     if not failed:
-        _feed_cache["feed"] = (time.time(), data)
+        cache_put("feed", data)
     return {**data, "videos": with_progress(data["videos"])}
 
 
@@ -500,8 +662,34 @@ async def feed(refresh: bool = False):
 # media URL yt-dlp returned, so the relay can't be aimed at anything else.
 
 _streams = {}   # token -> {url, headers, mime, born}
-_resolved = {}  # video id -> (time, info)
-RESOLVE_TTL = 30 * 60
+RESOLVE_TTL = 30 * 60  # stream addresses last about 6 hours; stay well inside that
+# One client (tv_samsung) gives every format echo-yt uses with two fewer
+# requests than yt-dlp's default set; live streams and anything it can't do
+# fall back to the defaults.
+FIRST_CLIENT = "youtube:player_client=tv_samsung"
+INFO_KEYS = ("id", "title", "channel", "uploader", "channel_id", "duration", "view_count", "timestamp",
+             "live_status", "description", "like_count", "upload_date", "channel_follower_count", "chapters")
+FORMAT_KEYS = ("url", "has_drm", "protocol", "vcodec", "acodec", "height", "fps", "tbr", "ext",
+               "http_headers", "language_preference", "format_id")
+
+
+def slim_info(info):
+    """Only what video_details and pick_sources read, to keep the cache small."""
+    return {**{k: info.get(k) for k in INFO_KEYS},
+            "formats": [{k: f.get(k) for k in FORMAT_KEYS} for f in info.get("formats") or []]}
+
+
+async def resolve_video(vid):
+    url = f"https://www.youtube.com/watch?v={vid}"
+    try:
+        info = await ytdlp_json("--no-playlist", "--extractor-args", FIRST_CLIENT, "--", url)
+        if info.get("live_status") != "is_live":
+            pick_sources(info, 1080)  # raises if nothing playable came back
+            return info
+    except HTTPException as e:
+        if e.status_code == 429:  # bot check: asking again would only make it worse
+            raise
+    return await ytdlp_json("--no-playlist", "--", url)
 STREAM_TTL = 6 * 3600
 
 
@@ -571,14 +759,10 @@ def pick_sources(info, quality):
 async def video_details(vid: str, quality: int = 1080, refresh: bool = False):
     if not VIDEO_ID.match(vid):
         raise HTTPException(400, "Bad video id")
-    cached = _resolved.get(vid)
-    if cached and not refresh and time.time() - cached[0] < RESOLVE_TTL:
-        info = cached[1]
-    else:
-        info = await ytdlp_json("--no-playlist", "--", f"https://www.youtube.com/watch?v={vid}")
-        _resolved[vid] = (time.time(), info)
-        for old in [k for k, (t, _) in _resolved.items() if time.time() - t > RESOLVE_TTL]:
-            del _resolved[old]
+    info = None if refresh else cache_get(f"video:{vid}", RESOLVE_TTL)
+    if info is None:
+        info = slim_info(await resolve_video(vid))
+        cache_put(f"video:{vid}", info)
     video = clean_entry(info)
     if not video:
         raise HTTPException(502, "yt-dlp returned an unexpected result")

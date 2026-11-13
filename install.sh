@@ -248,6 +248,22 @@ check_system_deps() {
     info "System dependencies OK"
 }
 
+check_pot_provider() {
+    # The bgutil PoToken provider makes the tokens YouTube's bot check asks
+    # for, so "Sign in to confirm you're not a bot" happens far less often.
+    # It's only in the AUR, so it needs an AUR helper; echo-yt works without it.
+    command -v bgutil-pot >/dev/null 2>&1 && { info "PoToken provider OK"; return; }
+    local helper
+    helper="$(command -v paru || command -v yay || true)"
+    if [ -z "$helper" ]; then
+        warn "No AUR helper (paru or yay) found - install bgutil-ytdlp-pot-provider from the AUR yourself to make YouTube's bot check less likely."
+        return
+    fi
+    info "Installing the PoToken provider (bgutil-ytdlp-pot-provider) from the AUR with $(basename "$helper")."
+    "$helper" -S --needed --noconfirm bgutil-ytdlp-pot-provider \
+        || warn "PoToken provider not installed - echo-yt works without it."
+}
+
 stage_files() {
     # Copy the new app files into $INSTALL_DIR.new first, so a failed copy
     # leaves the current install untouched (swap_in_staged moves it into place)
@@ -411,6 +427,7 @@ main() {
     fi
 
     check_system_deps
+    check_pot_provider
     stage_files "$source_dir"
     # stopped only once the new files are staged, so it's down as briefly as possible
     local restart_args=""
